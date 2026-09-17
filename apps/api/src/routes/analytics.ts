@@ -179,7 +179,7 @@ router.get('/financial-analysis/:entityId', async (req: AuthenticatedRequest, re
       ? circularPaths.records[0].get('circularCount').toNumber() 
       : (circularPaths.records[0]?.get('circularCount') || 0);
 
-    const suspiciousIndicators = [];
+    const suspiciousIndicators: any[] = [];
     if (circularCount > 0) {
       suspiciousIndicators.push({
         type: 'CIRCULAR_TRANSACTION',

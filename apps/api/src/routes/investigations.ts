@@ -203,6 +203,9 @@ router.patch('/:id', param('id').isUUID(), async (req: AuthenticatedRequest, res
   } catch (error) {
     logger.error('Update investigation error:', error);
     res.status(500).json({ error: 'Failed to update investigation' });
+  }
+});
+
 // PATCH /api/investigations/:id/access — update clearance and access control settings
 router.patch('/:id/access', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { accessControl } = req.body;

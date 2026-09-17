@@ -21,6 +21,7 @@ import DatabasePage from './pages/DatabasePage';
 import DataSourcesPage from './pages/DataSourcesPage';
 import InspectorHomePage from './pages/InspectorHomePage';
 import UserManagementPage from './pages/UserManagementPage';
+import CDRAnalysisPage from './pages/CDRAnalysisPage';
 import { isInspectorRole } from './lib/permissions';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -61,6 +62,7 @@ export default function App() {
             <Route path="documents" element={<DocumentsPage />} />
             <Route path="alerts" element={<AlertsPage />} />
             <Route path="timeline" element={<TimelinePage />} />
+            <Route path="cdr-analysis" element={<CDRAnalysisPage />} />
             <Route path="ai-assistant" element={<AIAssistantPage />} />
             <Route path="evidence" element={<EvidencePage />} />
             <Route path="evidence/:id" element={<EvidenceDetailPage />} />

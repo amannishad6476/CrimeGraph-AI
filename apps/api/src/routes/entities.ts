@@ -196,6 +196,8 @@ router.get('/:type/:id/timeline', async (req: AuthenticatedRequest, res: Respons
     logger.error('Get entity timeline error:', error);
     res.status(500).json({ error: 'Failed to fetch timeline' });
   }
+});
+
 // GET /api/entities/:type/:id/access — get entity clearance and access governance
 router.get('/:type/:id/access', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { type, id } = req.params;

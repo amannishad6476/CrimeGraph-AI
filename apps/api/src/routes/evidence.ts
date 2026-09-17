@@ -187,6 +187,8 @@ router.post('/:id/verify', async (req: AuthenticatedRequest, res: Response): Pro
     logger.error('Evidence verify error:', error);
     res.status(500).json({ error: 'Verification failed' });
   }
+});
+
 // PATCH /api/evidence/:id/access — update custody & access permissions for evidence block
 router.patch('/:id/access', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { accessControl } = req.body;

@@ -1,4 +1,4 @@
-import neo4j, { Driver, Session } from 'neo4j-driver';
+import neo4j, { Driver, Session, QueryResult } from 'neo4j-driver';
 import { logger } from '../utils/logger';
 
 let driver: Driver;
@@ -83,7 +83,7 @@ async function createIndexes(session: Session): Promise<void> {
 export async function runCypherQuery(
   cypher: string,
   params?: Record<string, unknown>
-): Promise<neo4j.QueryResult> {
+): Promise<QueryResult> {
   const session = getNeo4jSession();
   try {
     return await session.run(cypher, params);

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, FolderOpen, Network, Users, FileText,
-  Bell, Clock, Bot, Shield, BookOpen, Activity, Database, Server, Sliders,
+  Bell, Clock, Bot, Shield, BookOpen, Activity, Database, Server, Sliders, Radio,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { canManageDatabases, canViewAuditLogs, isInspectorRole } from '../../lib/permissions';
@@ -15,6 +15,7 @@ const navItems = [
   { path: '/database', label: 'Database Explorer', icon: Database, section: 'analysis' },
   { path: '/entities', label: 'Entities', icon: Users, section: 'analysis' },
   { path: '/timeline', label: 'Timeline', icon: Clock, section: 'analysis' },
+  { path: '/cdr-analysis', label: 'CDR Analysis', icon: Radio, section: 'analysis' },
   { path: '/alerts', label: 'Alerts', icon: Bell, section: 'intel' },
   { path: '/documents', label: 'Documents', icon: FileText, section: 'intel', hideForAdmin: true },
   { path: '/data-sources', label: 'Data Sources', icon: Server, section: 'tools' },

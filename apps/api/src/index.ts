@@ -28,6 +28,7 @@ import auditRoutes from './routes/audit';
 import analyticsRoutes from './routes/analytics';
 import aiRoutes from './routes/ai';
 import databaseRoutes from './routes/database';
+import cdrRoutes from './routes/cdr';
 import { logger } from './utils/logger';
 import { initPostgres } from './db/postgres';
 import { initNeo4j } from './db/neo4j';
@@ -85,6 +86,7 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/database', databaseRoutes);
+app.use('/api/cdr', cdrRoutes);
 
 // 404 handler
 app.use((_req, res) => {
