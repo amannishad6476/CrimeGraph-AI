@@ -1,14 +1,14 @@
-import type { Stylesheet, NodeSingular } from 'cytoscape';
+import type { Stylesheet, NodeSingular, EdgeSingular } from 'cytoscape';
 
 export const NODE_COLORS: Record<string, string> = {
-  Person: '#2563eb', // Blue
-  Phone: '#16a34a', // Green
-  Vehicle: '#ea580c', // Orange
-  Organization: '#7c3aed', // Purple
-  Location: '#dc2626', // Red
-  Account: '#ca8a04', // Amber/Yellow
-  Case: '#0891b2', // Cyan
-  Event: '#db2777', // Pink
+  Person: '#3b82f6', // Blue
+  Phone: '#10b981', // Emerald Green
+  Vehicle: '#f97316', // Orange
+  Organization: '#8b5cf6', // Violet / Purple
+  Location: '#ef4444', // Crimson / Red
+  Account: '#eab308', // Amber / Gold
+  Case: '#06b6d4', // Cyan
+  Event: '#ec4899', // Rose / Pink
 };
 
 export const NODE_SHAPES: Record<string, string> = {
@@ -33,16 +33,17 @@ export const NODE_ICONS: Record<string, string> = {
   Event: '📅',
 };
 
-// Calculate node size based on degree of connectivity (clamp between 32px and 54px)
+// Calculate node size based strictly on degree of connectivity (clamped between 34px and 58px)
+// Neutral analytical sizing — NEVER represents guilt, criminality, or risk
 export function getNodeSize(ele: NodeSingular): number {
   const degree = ele.degree ? ele.degree() : (ele.data('degree') || 1);
-  return Math.min(54, Math.max(32, 32 + degree * 2.2));
+  return Math.min(58, Math.max(34, 34 + Math.min(degree, 10) * 2.4));
 }
 
-// Generate Cytoscape Stylesheet with dynamic label visibility & high-contrast outlines
+// Generate Cytoscape Stylesheet with high-contrast dark theme and readable typography
 export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: boolean = false): Stylesheet[] {
   return [
-    // Base Node Style
+    // Base Node Style (Professional Dark Theme)
     {
       selector: 'node',
       style: {
@@ -51,60 +52,85 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
         'width': (ele: NodeSingular) => getNodeSize(ele),
         'height': (ele: NodeSingular) => getNodeSize(ele),
         'label': showLabels ? 'data(label)' : '',
-        'color': '#0f172a',
+        'color': '#f8fafc',
         'font-size': '11px',
-        'font-family': 'Inter, -apple-system, BlinkMacSystemFont, sans-serif',
+        'font-family': 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         'font-weight': '600',
         'text-valign': 'bottom',
         'text-halign': 'center',
-        'text-margin-y': 5,
-        'text-max-width': '95px',
+        'text-margin-y': 6,
+        'text-max-width': '105px',
         'text-wrap': 'ellipsis',
-        'text-outline-color': '#ffffff',
-        'text-outline-width': 2.5,
-        'text-outline-opacity': 1,
+        'text-outline-color': '#090d16',
+        'text-outline-width': 3,
+        'text-outline-opacity': 0.95,
         'border-width': 2.5,
-        'border-color': '#ffffff',
-        'border-opacity': 1,
+        'border-color': 'rgba(255, 255, 255, 0.85)',
+        'border-opacity': 0.9,
         'transition-property': 'background-color, border-color, border-width, width, height, opacity',
         'transition-duration': 200,
         'cursor': 'pointer',
       },
     },
 
-    // High Connectivity Node Badge / Border (Degree >= 6)
+    // High Connectivity Node Badge / Border (Degree >= 6) — Neutral Analytical Terminology
     {
       selector: 'node[degree >= 6]',
       style: {
         'border-width': 3.5,
         'border-color': '#ffffff',
+        'border-opacity': 1,
       },
     },
 
-    // Selected Node Style (Focus Ring)
+    // Selected Node Style (Visual Center & Glowing Focus Ring)
     {
       selector: 'node:selected, node.selected-node',
       style: {
         'border-width': 4.5,
-        'border-color': '#0f172a',
+        'border-color': '#38bdf8',
         'width': (ele: NodeSingular) => getNodeSize(ele) + 8,
         'height': (ele: NodeSingular) => getNodeSize(ele) + 8,
         'font-size': '13px',
         'font-weight': '700',
-        'text-outline-width': 3,
+        'color': '#ffffff',
+        'text-outline-color': '#0369a1',
+        'text-outline-width': 3.5,
         'z-index': 999,
         'opacity': 1,
       },
     },
 
-    // Highlighted / Focused Node Style
+    // Hop-1 Direct Neighbors Style (Focus Mode)
+    {
+      selector: 'node.hop-1',
+      style: {
+        'opacity': 1,
+        'border-width': 3,
+        'border-color': '#60a5fa',
+        'z-index': 150,
+      },
+    },
+
+    // Hop-2 Related Nodes Style (Focus Mode)
+    {
+      selector: 'node.hop-2',
+      style: {
+        'opacity': 0.85,
+        'border-width': 2,
+        'border-color': 'rgba(255, 255, 255, 0.45)',
+        'z-index': 100,
+      },
+    },
+
+    // Highlighted Node Style (Generic)
     {
       selector: 'node.highlighted',
       style: {
         'opacity': 1,
         'border-width': 3.5,
-        'border-color': '#0f172a',
-        'z-index': 100,
+        'border-color': '#38bdf8',
+        'z-index': 120,
       },
     },
 
@@ -113,13 +139,13 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
       selector: 'node.path-highlight',
       style: {
         'border-width': 4.5,
-        'border-color': '#f59e0b',
+        'border-color': '#fbbf24',
         'background-color': '#f59e0b',
-        'color': '#92400e',
+        'color': '#ffffff',
         'font-weight': '700',
         'font-size': '12px',
-        'text-outline-color': '#ffffff',
-        'text-outline-width': 3,
+        'text-outline-color': '#78350f',
+        'text-outline-width': 3.5,
         'z-index': 500,
         'opacity': 1,
       },
@@ -129,31 +155,43 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
     {
       selector: 'node.dimmed',
       style: {
-        'opacity': 0.15,
+        'opacity': 0.10,
         'label': '',
       },
     },
 
-    // Base Edge Style
+    // Node Hover State (Full Label Inspection)
+    {
+      selector: 'node:hover',
+      style: {
+        'label': 'data(fullLabel)',
+        'text-max-width': '220px',
+        'text-wrap': 'wrap',
+        'font-size': '12px',
+        'z-index': 1000,
+      },
+    },
+
+    // Base Edge Style (Clean, Visible, Connected)
     {
       selector: 'edge',
       style: {
-        'width': 1.6,
-        'line-color': '#94a3b8',
-        'target-arrow-color': '#94a3b8',
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.85,
+        'width': 2,
+        'line-color': '#64748b',
+        'target-arrow-color': '#64748b',
+        'target-arrow-shape': (ele: EdgeSingular) => (ele.data('hasDirection') ? 'triangle' : 'none'),
+        'arrow-scale': 0.8,
         'curve-style': 'bezier',
         'label': showEdgeLabels ? 'data(label)' : '',
-        'color': '#475569',
+        'color': '#cbd5e1',
         'font-size': '9px',
         'font-weight': '600',
-        'text-background-color': '#ffffff',
+        'text-background-color': '#0f172a',
         'text-background-opacity': 0.92,
         'text-background-padding': '2px',
         'edge-text-rotation': 'autorotate',
-        'opacity': 0.55,
-        'transition-property': 'line-color, width, opacity',
+        'opacity': 0.65,
+        'transition-property': 'line-color, target-arrow-color, width, opacity',
         'transition-duration': 200,
       },
     },
@@ -162,10 +200,10 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
     {
       selector: 'edge:hover',
       style: {
-        'width': 2.5,
-        'line-color': '#2563eb',
-        'target-arrow-color': '#2563eb',
-        'opacity': 0.9,
+        'width': 3.2,
+        'line-color': '#38bdf8',
+        'target-arrow-color': '#38bdf8',
+        'opacity': 1,
         'label': 'data(label)',
         'z-index': 50,
       },
@@ -175,25 +213,37 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
     {
       selector: 'edge:selected',
       style: {
-        'line-color': '#2563eb',
-        'target-arrow-color': '#2563eb',
-        'width': 3,
+        'line-color': '#38bdf8',
+        'target-arrow-color': '#38bdf8',
+        'width': 3.5,
         'opacity': 1,
         'label': 'data(label)',
         'z-index': 100,
       },
     },
 
-    // Edge Highlighted Style (Connecting to Selected/Focused Node)
+    // Hop-1 / Primary Highlighted Edge
     {
-      selector: 'edge.highlighted',
+      selector: 'edge.highlighted, edge.hop-1-edge',
       style: {
-        'line-color': '#2563eb',
-        'target-arrow-color': '#2563eb',
-        'width': 2.5,
-        'opacity': 1,
-        'label': 'data(label)',
+        'line-color': '#38bdf8',
+        'target-arrow-color': '#38bdf8',
+        'width': 3,
+        'opacity': 0.95,
+        'label': showEdgeLabels ? 'data(label)' : '',
         'z-index': 80,
+      },
+    },
+
+    // Hop-2 / Secondary Highlighted Edge
+    {
+      selector: 'edge.hop-2-edge',
+      style: {
+        'line-color': '#93c5fd',
+        'target-arrow-color': '#93c5fd',
+        'width': 2,
+        'opacity': 0.6,
+        'z-index': 60,
       },
     },
 
@@ -201,9 +251,9 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
     {
       selector: 'edge.path-highlight',
       style: {
-        'line-color': '#f59e0b',
-        'target-arrow-color': '#f59e0b',
-        'width': 3.5,
+        'line-color': '#fbbf24',
+        'target-arrow-color': '#fbbf24',
+        'width': 4,
         'opacity': 1,
         'label': 'data(label)',
         'z-index': 500,
@@ -214,7 +264,7 @@ export function getGraphStylesheet(showLabels: boolean = true, showEdgeLabels: b
     {
       selector: 'edge.dimmed',
       style: {
-        'opacity': 0.08,
+        'opacity': 0.06,
         'label': '',
       },
     },
@@ -233,14 +283,14 @@ export function getLayoutConfig(layoutName: string) {
         padding: 40,
         randomize: false,
         nodeDimensionsIncludeLabels: true,
-        idealEdgeLength: 80,
-        edgeElasticity: 0.45,
-        nodeRepulsion: 5500,
-        gravity: 0.35,
+        idealEdgeLength: 65,
+        edgeElasticity: 0.65,
+        nodeRepulsion: 4500,
+        gravity: 0.4,
         numIter: 2500,
         tile: true,
-        tilingPaddingVertical: 30,
-        tilingPaddingHorizontal: 30,
+        tilingPaddingVertical: 20,
+        tilingPaddingHorizontal: 20,
         gravityRangeCompound: 1.5,
         gravityCompound: 1.0,
         gravityRange: 3.8,
@@ -254,12 +304,12 @@ export function getLayoutConfig(layoutName: string) {
         animationDuration: 700,
         fit: true,
         padding: 40,
-        componentSpacing: 80,
-        nodeRepulsion: () => 6000,
-        idealEdgeLength: () => 85,
-        edgeElasticity: () => 100,
-        gravity: 0.3,
-        numIter: 1000,
+        componentSpacing: 60,
+        nodeRepulsion: () => 4500,
+        idealEdgeLength: () => 70,
+        edgeElasticity: () => 120,
+        gravity: 0.35,
+        numIter: 1200,
       };
 
     case 'concentric':
@@ -273,7 +323,7 @@ export function getLayoutConfig(layoutName: string) {
           return node.degree ? node.degree() : 1;
         },
         levelWidth: () => 2,
-        minNodeSpacing: 50,
+        minNodeSpacing: 45,
       };
 
     case 'breadthfirst':
@@ -284,7 +334,7 @@ export function getLayoutConfig(layoutName: string) {
         padding: 40,
         animate: true,
         animationDuration: 600,
-        spacingFactor: 1.25,
+        spacingFactor: 1.15,
       };
 
     case 'circle':

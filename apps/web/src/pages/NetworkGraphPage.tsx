@@ -6,7 +6,8 @@ import coseBilkent from 'cytoscape-cose-bilkent';
 import {
   Search, ZoomIn, ZoomOut, Maximize2, RefreshCw, Filter,
   Download, Info, X, ChevronRight, Loader, Network, GitBranch,
-  Eye, EyeOff, Tag, Compass, Sparkles, Layers, SlidersHorizontal, Check
+  Eye, EyeOff, Tag, Compass, Sparkles, SlidersHorizontal, Check,
+  Target, Focus, Layers, ShieldCheck
 } from 'lucide-react';
 import api from '../lib/api';
 import { ALL_ENTITIES, GRAPH_EDGES, FIR_RECORDS } from '../data/dataset';
@@ -14,6 +15,7 @@ import {
   NODE_COLORS,
   NODE_SHAPES,
   NODE_ICONS,
+  getNodeSize,
   getGraphStylesheet,
   getLayoutConfig,
 } from '../components/graph/graphConfig';
@@ -32,7 +34,11 @@ interface GraphNode {
   number?: string;
   licensePlate?: string;
   accountNumber?: string;
+  firNumber?: string;
   degree?: number;
+  fullLabel?: string;
+  label?: string;
+  isHighConnectivity?: boolean;
   [key: string]: unknown;
 }
 
@@ -45,10 +51,41 @@ interface GraphEdge {
   timestamp?: string;
   relSource?: string;
   recordRef?: string;
+  hasDirection?: boolean;
+  directed?: boolean;
+  [key: string]: unknown;
 }
 
-function getNodeLabel(node: GraphNode): string {
-  return (node.name || node.number || node.licensePlate || node.accountNumber || node.id || '').substring(0, 24);
+interface TooltipInfo {
+  x: number;
+  y: number;
+  node?: GraphNode;
+  edge?: GraphEdge;
+}
+
+// Directional relationship types in crime & intelligence networks
+const DIRECTIONAL_TYPES = new Set([
+  'CALLS', 'TRANSFERRED_TO', 'FINANCIAL_TRANSACTION',
+  'APPEARED_IN_CASE', 'LOCATED_AT', 'WORKS_FOR', 'OWNS', 'FILED_AGAINST'
+]);
+
+function isEdgeDirectional(edge: Partial<GraphEdge>): boolean {
+  if (edge.directed === false) return false;
+  if (edge.directed === true) return true;
+  if (edge.hasDirection !== undefined) return Boolean(edge.hasDirection);
+  return DIRECTIONAL_TYPES.has(edge.type || '');
+}
+
+function getNodeFullLabel(node: Partial<GraphNode>): string {
+  return String(node.name || node.number || node.licensePlate || node.accountNumber || node.firNumber || node.id || '');
+}
+
+function getNodeLabel(node: Partial<GraphNode>): string {
+  const full = getNodeFullLabel(node);
+  if (full.length > 20) {
+    return `${full.substring(0, 18)}…`;
+  }
+  return full;
 }
 
 export default function NetworkGraphPage() {
@@ -66,7 +103,7 @@ export default function NetworkGraphPage() {
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
 
-  // Search & Navigation
+  // Search & Feedback
   const [searchTerm, setSearchTerm] = useState('');
   const [searchFilterType, setSearchFilterType] = useState('');
   const [searchFeedback, setSearchFeedback] = useState<string | null>(null);
@@ -83,6 +120,9 @@ export default function NetworkGraphPage() {
   const [showEdgeLabels, setShowEdgeLabels] = useState(false);
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
 
+  // Interactive Tooltip on Hover
+  const [hoverTooltip, setHoverTooltip] = useState<TooltipInfo | null>(null);
+
   // Path Finder State
   const [pathMode, setPathMode] = useState(false);
   const [pathNodes, setPathNodes] = useState<GraphNode[]>([]);
@@ -92,6 +132,102 @@ export default function NetworkGraphPage() {
   // Master Graph Data Cache
   const masterNodesRef = useRef<GraphNode[]>([]);
   const masterEdgesRef = useRef<GraphEdge[]>([]);
+
+  // --------------------------------------------------------------------------
+  // Apply Hierarchical Focus Mode (Target, 1-Hop, 2-Hop, Dim Rest)
+  // --------------------------------------------------------------------------
+  const applyFocusMode = useCallback((nodeEle: NodeSingular) => {
+    if (!cyInstance.current) return;
+    const cy = cyInstance.current;
+    const targetData = nodeEle.data() as GraphNode;
+
+    setSelectedNode(targetData);
+    setSelectedEdge(null);
+    setFocusedNodeId(nodeEle.id());
+
+    // 1-hop neighborhood
+    const hop1Neighborhood = nodeEle.neighborhood();
+    const hop1Nodes = hop1Neighborhood.nodes();
+    const hop1Edges = nodeEle.connectedEdges();
+
+    // 2-hop neighborhood: neighbors of hop-1 nodes excluding center and hop-1
+    const closedHop1 = nodeEle.closedNeighborhood();
+    const hop2Nodes = closedHop1.neighborhood().nodes().difference(closedHop1);
+    const hop2Edges = hop1Nodes.connectedEdges().difference(hop1Edges);
+
+    cy.batch(() => {
+      // Clear previous states
+      cy.elements().removeClass(
+        'selected-node hop-1 hop-2 highlighted hop-1-edge hop-2-edge dimmed path-highlight'
+      );
+
+      // Mute everything by default
+      cy.elements().addClass('dimmed');
+
+      // Unmute and highlight 2-hop secondary tier
+      hop2Nodes.removeClass('dimmed').addClass('hop-2');
+      hop2Edges.removeClass('dimmed').addClass('hop-2-edge');
+
+      // Unmute and highlight 1-hop primary tier
+      hop1Nodes.removeClass('dimmed').addClass('hop-1');
+      hop1Edges.removeClass('dimmed').addClass('hop-1-edge');
+
+      // Target node in the absolute focus center
+      nodeEle.removeClass('dimmed').addClass('selected-node');
+    });
+  }, []);
+
+  // --------------------------------------------------------------------------
+  // Reset Focus / Restore Complete Graph
+  // --------------------------------------------------------------------------
+  const resetFocus = useCallback(() => {
+    setSelectedNode(null);
+    setSelectedEdge(null);
+    setFocusedNodeId(null);
+    setSearchFeedback(null);
+
+    if (cyInstance.current) {
+      cyInstance.current.batch(() => {
+        cyInstance.current?.elements().removeClass(
+          'selected-node hop-1 hop-2 highlighted hop-1-edge hop-2-edge dimmed path-highlight'
+        );
+      });
+    }
+  }, []);
+
+  // --------------------------------------------------------------------------
+  // Focus on currently selected node with smooth viewport center
+  // --------------------------------------------------------------------------
+  const focusSelected = useCallback(() => {
+    if (!cyInstance.current || !selectedNode) return;
+    const cy = cyInstance.current;
+    const target = cy.$(`node[id = "${selectedNode.id}"]`);
+    if (target.length > 0) {
+      applyFocusMode(target[0]);
+      cy.animate({
+        center: { eles: target[0] },
+        zoom: Math.min(1.8, Math.max(1.25, cy.zoom())),
+        duration: 400,
+      });
+    }
+  }, [selectedNode, applyFocusMode]);
+
+  // --------------------------------------------------------------------------
+  // Run Layout with Error Guard
+  // --------------------------------------------------------------------------
+  const runLayout = useCallback((layoutName: string) => {
+    if (!cyInstance.current) return;
+    const cy = cyInstance.current;
+    const config = getLayoutConfig(layoutName);
+
+    try {
+      const layout = cy.layout(config as any);
+      layout.run();
+    } catch (err) {
+      console.warn('Layout execution error, falling back to cose:', err);
+      cy.layout({ name: 'cose', animate: true, animationDuration: 600, padding: 40 } as any).run();
+    }
+  }, []);
 
   // --------------------------------------------------------------------------
   // Initialize Cytoscape Instance (Called Once)
@@ -107,19 +243,15 @@ export default function NetworkGraphPage() {
       container: cyRef.current,
       style: getGraphStylesheet(true, false),
       layout: { name: 'preset' },
-      wheelSensitivity: 0.25,
-      minZoom: 0.1,
-      maxZoom: 4,
+      wheelSensitivity: 0.2,
+      minZoom: 0.15,
+      maxZoom: 3.5,
     });
 
-    // Node Tap (Selection & Neighborhood Focus Mode)
+    // Node Tap -> Select and apply Focus Mode
     cy.on('tap', 'node', (evt) => {
       const node = evt.target;
-      const data = node.data();
-
-      setSelectedNode(data);
-      setSelectedEdge(null);
-      setFocusedNodeId(node.id());
+      const data = node.data() as GraphNode;
 
       if (pathMode) {
         setPathNodes((prev) => {
@@ -132,18 +264,10 @@ export default function NetworkGraphPage() {
         });
       }
 
-      // Enter Focus Mode: Highlight selected node and 1-hop direct neighborhood
-      cy.batch(() => {
-        cy.elements().removeClass('highlighted dimmed selected-node');
-        node.addClass('selected-node highlighted');
-
-        const neighborhood = node.closedNeighborhood();
-        cy.elements().not(neighborhood).addClass('dimmed');
-        neighborhood.addClass('highlighted');
-      });
+      applyFocusMode(node);
     });
 
-    // Edge Tap
+    // Edge Tap -> Inspect relationship
     cy.on('tap', 'edge', (evt) => {
       const edge = evt.target;
       setSelectedEdge(edge.data());
@@ -151,59 +275,50 @@ export default function NetworkGraphPage() {
       setFocusedNodeId(null);
 
       cy.batch(() => {
-        cy.elements().removeClass('highlighted dimmed selected-node');
+        cy.elements().removeClass(
+          'selected-node hop-1 hop-2 highlighted hop-1-edge hop-2-edge dimmed path-highlight'
+        );
         edge.addClass('highlighted');
         edge.connectedNodes().addClass('highlighted');
         cy.elements().not(edge.union(edge.connectedNodes())).addClass('dimmed');
       });
     });
 
-    // Canvas Tap (Reset Focus on Background Click)
+    // Canvas Tap -> Reset Focus on Background Click
     cy.on('tap', (evt) => {
       if (evt.target === cy) {
         resetFocus();
       }
     });
 
+    // Tooltip Hover Handlers
+    cy.on('mouseover', 'node', (evt) => {
+      const node = evt.target;
+      const renderedPos = node.renderedPosition();
+      const containerRect = cyRef.current?.getBoundingClientRect();
+      if (containerRect) {
+        setHoverTooltip({
+          x: containerRect.left + renderedPos.x,
+          y: containerRect.top + renderedPos.y - 20,
+          node: node.data() as GraphNode,
+        });
+      }
+    });
+
+    cy.on('mouseout', 'node', () => {
+      setHoverTooltip(null);
+    });
+
+    cy.on('pan zoom drag', () => {
+      setHoverTooltip(null);
+    });
+
     cyInstance.current = cy;
     return cy;
-  }, [pathMode]);
+  }, [pathMode, applyFocusMode, resetFocus]);
 
   // --------------------------------------------------------------------------
-  // Reset Focus / Restore Full Graph
-  // --------------------------------------------------------------------------
-  const resetFocus = useCallback(() => {
-    setSelectedNode(null);
-    setSelectedEdge(null);
-    setFocusedNodeId(null);
-    setSearchFeedback(null);
-
-    if (cyInstance.current) {
-      cyInstance.current.batch(() => {
-        cyInstance.current?.elements().removeClass('highlighted dimmed selected-node path-highlight');
-      });
-    }
-  }, []);
-
-  // --------------------------------------------------------------------------
-  // Run Layout with Auto-Fit
-  // --------------------------------------------------------------------------
-  const runLayout = useCallback((layoutName: string) => {
-    if (!cyInstance.current) return;
-    const cy = cyInstance.current;
-    const config = getLayoutConfig(layoutName);
-
-    try {
-      const layout = cy.layout(config as any);
-      layout.run();
-    } catch (err) {
-      console.warn('Layout execution error, falling back to cose:', err);
-      cy.layout({ name: 'cose', animate: true, animationDuration: 600 } as any).run();
-    }
-  }, []);
-
-  // --------------------------------------------------------------------------
-  // Render Graph Data with Degree Computation & Clustering
+  // Render Graph Data with Degree Computation & Deterministic Grouping
   // --------------------------------------------------------------------------
   const renderGraph = useCallback((cy: Core, nodes: GraphNode[], edges: GraphEdge[]) => {
     masterNodesRef.current = nodes;
@@ -232,11 +347,13 @@ export default function NetworkGraphPage() {
 
     const cyNodes = nodes.map((n) => {
       const deg = degreeMap.get(n.id) || 0;
+      const fullLabel = getNodeFullLabel(n);
       return {
         group: 'nodes' as const,
         data: {
           id: n.id,
           label: getNodeLabel(n),
+          fullLabel: fullLabel,
           nodeType: n.nodeType,
           degree: deg,
           isHighConnectivity: deg >= 6,
@@ -245,26 +362,30 @@ export default function NetworkGraphPage() {
       };
     });
 
-    const cyEdges = validEdges.map((e, i) => ({
-      group: 'edges' as const,
-      data: {
-        id: e.id || `edge-${i}-${e.source}-${e.target}`,
-        source: e.source,
-        target: e.target,
-        type: e.type,
-        confidence: e.confidence || 0.85,
-        label: e.type ? e.type.replace(/_/g, ' ') : '',
-        relSource: e.relSource,
-        recordRef: e.recordRef,
-        timestamp: e.timestamp,
-      },
-    }));
+    const cyEdges = validEdges.map((e, i) => {
+      const hasDir = isEdgeDirectional(e);
+      return {
+        group: 'edges' as const,
+        data: {
+          id: e.id || `edge-${i}-${e.source}-${e.target}`,
+          source: e.source,
+          target: e.target,
+          type: e.type,
+          confidence: e.confidence || 0.85,
+          label: e.type ? e.type.replace(/_/g, ' ') : '',
+          relSource: e.relSource,
+          recordRef: e.recordRef,
+          timestamp: e.timestamp,
+          hasDirection: hasDir,
+        },
+      };
+    });
 
     cy.batch(() => {
       cy.add([...cyNodes, ...cyEdges]);
     });
 
-    // Calculate connected components count
+    // Calculate connected components
     try {
       const components = cy.elements().components();
       setComponentCount(components.length);
@@ -275,28 +396,20 @@ export default function NetworkGraphPage() {
     setNodeCount(cyNodes.length);
     setEdgeCount(cyEdges.length);
 
-    // Run CoSE-Bilkent clustering layout
+    // Run CoSE-Bilkent compact layout
     runLayout(activeLayout);
 
-    // If focused on an entity from URL query, zoom to it
+    // If focused on an entity from URL query, zoom to it with Focus Mode
     if (entityIdParam) {
       setTimeout(() => {
         const target = cy.$(`node[id = "${entityIdParam}"]`);
         if (target && target.length > 0) {
-          setSelectedNode(target.data());
-          setFocusedNodeId(target.id());
-          cy.batch(() => {
-            cy.elements().removeClass('highlighted dimmed selected-node');
-            target.addClass('selected-node highlighted');
-            const neighborhood = target.closedNeighborhood();
-            cy.elements().not(neighborhood).addClass('dimmed');
-            neighborhood.addClass('highlighted');
-          });
-          cy.animate({ center: { eles: target }, zoom: 1.4, duration: 400 });
+          applyFocusMode(target[0]);
+          cy.animate({ center: { eles: target[0] }, zoom: 1.45, duration: 400 });
         }
       }, 700);
     }
-  }, [activeLayout, entityIdParam, runLayout]);
+  }, [activeLayout, entityIdParam, runLayout, applyFocusMode]);
 
   // --------------------------------------------------------------------------
   // Fallbacks: Investigation, Entity, and Master Graph
@@ -349,6 +462,7 @@ export default function NetworkGraphPage() {
       type: e.type,
       confidence: e.confidence,
       relSource: (e as any).source_ref || 'CASE_INTELLIGENCE_LINK',
+      hasDirection: isEdgeDirectional(e),
     }));
 
     (targetFir.linkedEntities || []).forEach((entityId, idx) => {
@@ -364,6 +478,7 @@ export default function NetworkGraphPage() {
             type: 'APPEARED_IN_CASE',
             confidence: 0.99,
             relSource: targetFir.firNumber,
+            hasDirection: true,
           });
         }
       }
@@ -418,6 +533,7 @@ export default function NetworkGraphPage() {
       type: e.type,
       confidence: e.confidence,
       relSource: (e as any).source_ref || 'ENTITY_EXPANSION',
+      hasDirection: isEdgeDirectional(e),
     }));
 
     renderGraph(cy, demoNodes, demoEdges);
@@ -438,6 +554,7 @@ export default function NetworkGraphPage() {
       type: e.type,
       confidence: e.confidence,
       relSource: (e as any).source_ref || 'LAW_ENFORCEMENT_RECORDS',
+      hasDirection: isEdgeDirectional(e),
     }));
 
     renderGraph(cy, demoNodes, demoEdges);
@@ -481,21 +598,28 @@ export default function NetworkGraphPage() {
     }
   }, [investigationCase, entityIdParam, entityTypeParam, renderGraph, renderInvestigationFallback, renderEntityFallback, renderDemoGraph]);
 
-  // Initial Load
+  // Initial Load with proper cleanup
   useEffect(() => {
     const cy = initCytoscape();
     if (!cy) return;
     loadNetwork(cy);
+
+    return () => {
+      if (cyInstance.current) {
+        cyInstance.current.destroy();
+        cyInstance.current = null;
+      }
+    };
   }, [investigationCase, entityIdParam, entityTypeParam]);
 
-  // Update styles when label toggles change without reloading canvas
+  // Dynamic Label Style Update
   useEffect(() => {
     if (!cyInstance.current) return;
     cyInstance.current.style(getGraphStylesheet(showLabels, showEdgeLabels) as any);
   }, [showLabels, showEdgeLabels]);
 
   // --------------------------------------------------------------------------
-  // Entity Type Filtering (Without corrupting graph data)
+  // Non-Destructive Entity Type Filtering
   // --------------------------------------------------------------------------
   const toggleTypeFilter = (type: string) => {
     if (!cyInstance.current) return;
@@ -520,7 +644,6 @@ export default function NetworkGraphPage() {
       });
     });
 
-    // Update connected components metric for visible nodes
     try {
       const visibleComponents = cy.elements(':visible').components();
       setComponentCount(visibleComponents.length);
@@ -541,7 +664,7 @@ export default function NetworkGraphPage() {
   };
 
   // --------------------------------------------------------------------------
-  // Enhanced Search with Animated Focus & Neighborhood Zoom
+  // Enhanced Search with Automatic Focus Mode and Smooth Pan
   // --------------------------------------------------------------------------
   const handleSearch = () => {
     setSearchFeedback(null);
@@ -549,11 +672,23 @@ export default function NetworkGraphPage() {
     const cy = cyInstance.current;
     const term = searchTerm.trim().toLowerCase();
 
-    // 1. Search existing canvas nodes
+    // 1. Check existing canvas nodes
     const matchedNode = cy.nodes().filter((n) => {
       const data = n.data();
-      const label = (data.label || data.name || data.number || data.licensePlate || data.accountNumber || data.id || '').toLowerCase();
-      const matchesText = label.includes(term) || n.id().toLowerCase() === term;
+      const name = (data.name || '').toLowerCase();
+      const number = (data.number || '').toLowerCase();
+      const plate = (data.licensePlate || '').toLowerCase();
+      const acc = (data.accountNumber || '').toLowerCase();
+      const fir = (data.firNumber || '').toLowerCase();
+      const id = n.id().toLowerCase();
+      const matchesText =
+        name.includes(term) ||
+        number.includes(term) ||
+        plate.includes(term) ||
+        acc.includes(term) ||
+        fir.includes(term) ||
+        id === term;
+
       if (searchFilterType) {
         return matchesText && data.nodeType === searchFilterType;
       }
@@ -562,17 +697,7 @@ export default function NetworkGraphPage() {
 
     if (matchedNode && matchedNode.length > 0) {
       const target = matchedNode[0];
-      setSelectedNode(target.data());
-      setSelectedEdge(null);
-      setFocusedNodeId(target.id());
-
-      cy.batch(() => {
-        cy.elements().removeClass('highlighted dimmed selected-node');
-        target.addClass('selected-node highlighted');
-        const neighborhood = target.closedNeighborhood();
-        cy.elements().not(neighborhood).addClass('dimmed');
-        neighborhood.addClass('highlighted');
-      });
+      applyFocusMode(target);
 
       cy.animate({
         center: { eles: target },
@@ -580,14 +705,24 @@ export default function NetworkGraphPage() {
         duration: 450,
       });
 
-      setSearchFeedback(`Focused: ${getNodeLabel(target.data())} (${target.data('nodeType')})`);
+      setSearchFeedback(`Focused: ${getNodeFullLabel(target.data())} (${target.data('nodeType')})`);
       return;
     }
 
-    // 2. Fallback check in master entity directory
+    // 2. Check master entity directory
     const directoryMatch = (ALL_ENTITIES as any[]).find((e) => {
-      const label = (e.name || e.number || e.licensePlate || e.accountNumber || e.id || '').toLowerCase();
-      const matchesText = label.includes(term) || e.id.toLowerCase() === term;
+      const name = (e.name || '').toLowerCase();
+      const number = (e.number || '').toLowerCase();
+      const plate = (e.licensePlate || '').toLowerCase();
+      const acc = (e.accountNumber || '').toLowerCase();
+      const id = e.id.toLowerCase();
+      const matchesText =
+        name.includes(term) ||
+        number.includes(term) ||
+        plate.includes(term) ||
+        acc.includes(term) ||
+        id === term;
+
       if (searchFilterType) {
         return matchesText && e.nodeType === searchFilterType;
       }
@@ -596,14 +731,14 @@ export default function NetworkGraphPage() {
 
     if (directoryMatch) {
       renderEntityFallback(cy, directoryMatch.id, directoryMatch.nodeType);
-      setSearchFeedback(`Loaded entity network for: ${directoryMatch.name || directoryMatch.id}`);
+      setSearchFeedback(`Loaded network for: ${directoryMatch.name || directoryMatch.id}`);
     } else {
-      setSearchFeedback(`Entity "${searchTerm}" not found in current network graph.`);
+      setSearchFeedback(`Entity "${searchTerm}" not found in current network.`);
     }
   };
 
   // --------------------------------------------------------------------------
-  // Enhanced Path Finder with Amber Highlights & Step Sequence
+  // Enhanced Path Finder with Amber Glow and Step Sequence
   // --------------------------------------------------------------------------
   const findPath = async () => {
     if (pathNodes.length < 2 || !cyInstance.current) return;
@@ -626,7 +761,7 @@ export default function NetworkGraphPage() {
           paths = res.data.paths;
         }
       } catch {
-        // API offline -> fall back to Cytoscape's local A* search
+        // Fallback to local Cytoscape A* search
       }
 
       // Local Cytoscape A* Algorithm Fallback
@@ -671,7 +806,9 @@ export default function NetworkGraphPage() {
         bestPath.nodes?.forEach((n: any) => pathNodeIds.add(n.id));
 
         cy.batch(() => {
-          cy.elements().removeClass('path-highlight highlighted dimmed selected-node');
+          cy.elements().removeClass(
+            'selected-node hop-1 hop-2 highlighted hop-1-edge hop-2-edge dimmed path-highlight'
+          );
 
           // Dim all nodes not on path
           cy.nodes().forEach((n) => {
@@ -723,6 +860,7 @@ export default function NetworkGraphPage() {
         data: {
           id: n.id,
           label: getNodeLabel(n),
+          fullLabel: getNodeFullLabel(n),
           nodeType: n.nodeType,
           degree: 1,
           ...n,
@@ -739,6 +877,7 @@ export default function NetworkGraphPage() {
           source: e.source,
           target: e.target,
           label: e.type?.replace(/_/g, ' '),
+          hasDirection: isEdgeDirectional(e),
           ...e,
         },
       }));
@@ -759,7 +898,7 @@ export default function NetworkGraphPage() {
 
   const exportGraph = () => {
     if (!cyInstance.current) return;
-    const png = cyInstance.current.png({ output: 'blob', scale: 2, bg: '#ffffff' });
+    const png = cyInstance.current.png({ output: 'blob', scale: 2, bg: '#090d16' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(png);
     a.download = `crimegraph-network-${Date.now()}.png`;
@@ -767,20 +906,50 @@ export default function NetworkGraphPage() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--topbar-height) - 40px)', gap: 10 }}>
-      {/* Investigation / Entity Context Disclaimer */}
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--topbar-height) - 36px)', gap: 10 }}>
+      {/* Context Banner if opened from Investigation or Entity Detail */}
       {investigationCase && (
-        <div className="ai-disclaimer" style={{ padding: '6px 14px', fontSize: '0.78rem' }}>
-          Focused investigation graph: <strong>{investigationCase}</strong>. Clustered network showing connected entities, communications, and associations.
+        <div
+          style={{
+            padding: '7px 14px',
+            fontSize: '0.8rem',
+            background: 'rgba(15, 23, 42, 0.85)',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            borderRadius: 'var(--radius-sm)',
+            color: '#e2e8f0',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <Network size={14} color="#38bdf8" />
+          <span>
+            Focused Investigation Network: <strong style={{ color: '#38bdf8' }}>{investigationCase}</strong> — Clustered topology showing connected entities and recorded communications.
+          </span>
         </div>
       )}
       {entityIdParam && (
-        <div className="ai-disclaimer" style={{ padding: '6px 14px', fontSize: '0.78rem' }}>
-          Focused entity network: <strong>{entityTypeParam} · {entityIdParam}</strong>. Exploring multi-hop associations and communication links.
+        <div
+          style={{
+            padding: '7px 14px',
+            fontSize: '0.8rem',
+            background: 'rgba(15, 23, 42, 0.85)',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            borderRadius: 'var(--radius-sm)',
+            color: '#e2e8f0',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <Focus size={14} color="#38bdf8" />
+          <span>
+            Focused Entity Network: <strong style={{ color: '#38bdf8' }}>{entityTypeParam} · {entityIdParam}</strong> — Multi-hop associations and communication links.
+          </span>
         </div>
       )}
 
-      {/* Main Graph Toolbar */}
+      {/* Main Graph Toolbar (Dark Glassmorphic UI) */}
       <div
         style={{
           display: 'flex',
@@ -788,35 +957,36 @@ export default function NetworkGraphPage() {
           justifyContent: 'space-between',
           flexWrap: 'wrap',
           gap: 10,
-          background: 'var(--bg-card)',
+          background: 'rgba(15, 23, 42, 0.94)',
+          backdropFilter: 'blur(10px)',
           padding: '10px 14px',
           borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--border-primary)',
-          boxShadow: 'var(--shadow-sm)',
+          border: '1px solid rgba(255, 255, 255, 0.12)',
+          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
         }}
       >
-        {/* Left: Title & Search */}
+        {/* Left: Title & Search Bar */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginRight: 6 }}>
-            <Network size={18} color="var(--accent-primary)" />
-            <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-              Network Analysis
+            <Network size={18} color="#38bdf8" />
+            <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f8fafc', letterSpacing: '-0.01em' }}>
+              Relationship Graph
             </span>
           </div>
 
           {/* Search Box */}
-          <div style={{ display: 'flex', gap: 6, flex: 1, maxWidth: 440 }}>
+          <div style={{ display: 'flex', gap: 6, flex: 1, maxWidth: 460 }}>
             <select
               value={searchFilterType}
               onChange={(e) => setSearchFilterType(e.target.value)}
               style={{
                 width: 110,
-                fontSize: '0.8rem',
+                fontSize: '0.78rem',
                 padding: '5px 8px',
                 borderRadius: 6,
-                border: '1px solid var(--border-primary)',
-                background: 'var(--bg-elevated)',
-                color: 'var(--text-primary)',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                background: '#1e293b',
+                color: '#f1f5f9',
                 outline: 'none',
               }}
             >
@@ -827,10 +997,10 @@ export default function NetworkGraphPage() {
             </select>
 
             <div style={{ position: 'relative', flex: 1 }}>
-              <Search size={13} style={{ position: 'absolute', left: 9, top: 9, color: 'var(--text-muted)' }} />
+              <Search size={13} style={{ position: 'absolute', left: 9, top: 9, color: '#94a3b8' }} />
               <input
                 type="text"
-                placeholder="Search entity name, phone, plate, ID..."
+                placeholder="Search person, phone, plate, account, ID..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -839,24 +1009,28 @@ export default function NetworkGraphPage() {
                   padding: '6px 8px 6px 28px',
                   fontSize: '0.8rem',
                   borderRadius: 6,
-                  border: '1px solid var(--border-primary)',
-                  background: 'var(--bg-elevated)',
-                  color: 'var(--text-primary)',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  background: '#1e293b',
+                  color: '#f8fafc',
                   outline: 'none',
                 }}
               />
             </div>
-            <button className="btn btn-primary btn-sm" onClick={handleSearch}>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={handleSearch}
+              style={{ padding: '5px 12px', fontSize: '0.78rem' }}
+            >
               Search
             </button>
           </div>
         </div>
 
-        {/* Right: Controls & Toggles */}
+        {/* Right: Layout, Focus, Labels & Viewport Controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           {/* Layout Selector */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Compass size={14} color="var(--text-muted)" />
+            <Compass size={14} color="#94a3b8" />
             <select
               value={activeLayout}
               onChange={(e) => {
@@ -868,14 +1042,14 @@ export default function NetworkGraphPage() {
                 fontSize: '0.78rem',
                 padding: '5px 8px',
                 borderRadius: 6,
-                border: '1px solid var(--border-primary)',
-                background: 'var(--bg-elevated)',
-                color: 'var(--text-primary)',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                background: '#1e293b',
+                color: '#f1f5f9',
                 outline: 'none',
               }}
               title="Change Graph Layout Algorithm"
             >
-              <option value="cose-bilkent">Smart Cluster (Bilkent)</option>
+              <option value="cose-bilkent">Compact Cluster (Bilkent)</option>
               <option value="cose">Spring Force (CoSE)</option>
               <option value="concentric">Concentric (Connectivity)</option>
               <option value="breadthfirst">Breadth-First (Tree)</option>
@@ -886,18 +1060,44 @@ export default function NetworkGraphPage() {
           <button
             className="btn btn-secondary btn-sm"
             onClick={() => runLayout(activeLayout)}
-            title="Auto-arrange nodes and compact empty space"
+            style={{
+              background: '#1e293b',
+              color: '#e2e8f0',
+              borderColor: 'rgba(255, 255, 255, 0.15)',
+            }}
+            title="Auto-arrange connected nodes and minimize whitespace"
           >
-            <Sparkles size={13} style={{ marginRight: 4 }} />
+            <Sparkles size={13} style={{ marginRight: 4, color: '#38bdf8' }} />
             Auto Layout
           </button>
+
+          {/* Focus Selected */}
+          {selectedNode && (
+            <button
+              className="btn btn-sm"
+              onClick={focusSelected}
+              style={{
+                background: 'rgba(56, 189, 248, 0.2)',
+                color: '#38bdf8',
+                borderColor: '#38bdf8',
+              }}
+              title="Center and isolate selected entity with 1-hop & 2-hop neighborhood"
+            >
+              <Focus size={13} style={{ marginRight: 4 }} />
+              Focus Selected
+            </button>
+          )}
 
           {/* Reset Focus */}
           {focusedNodeId && (
             <button
-              className="btn btn-secondary btn-sm"
+              className="btn btn-sm"
               onClick={resetFocus}
-              style={{ background: '#fef3c7', color: '#92400e', borderColor: '#fcd34d' }}
+              style={{
+                background: 'rgba(245, 158, 11, 0.18)',
+                color: '#fbbf24',
+                borderColor: 'rgba(245, 158, 11, 0.4)',
+              }}
               title="Restore full graph visibility"
             >
               <X size={13} style={{ marginRight: 4 }} />
@@ -909,6 +1109,7 @@ export default function NetworkGraphPage() {
           <button
             className={`btn btn-sm ${showLabels ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setShowLabels((v) => !v)}
+            style={!showLabels ? { background: '#1e293b', color: '#94a3b8', borderColor: 'rgba(255, 255, 255, 0.15)' } : {}}
             title="Show or hide entity names on canvas"
           >
             {showLabels ? <Eye size={13} /> : <EyeOff size={13} />}
@@ -919,6 +1120,7 @@ export default function NetworkGraphPage() {
           <button
             className={`btn btn-sm ${showEdgeLabels ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setShowEdgeLabels((v) => !v)}
+            style={!showEdgeLabels ? { background: '#1e293b', color: '#94a3b8', borderColor: 'rgba(255, 255, 255, 0.15)' } : {}}
             title="Show or hide relationship labels on edges"
           >
             <Tag size={13} style={{ marginRight: 4 }} />
@@ -934,19 +1136,20 @@ export default function NetworkGraphPage() {
               setPathResult(null);
               resetFocus();
             }}
-            title="Trace connection path between two nodes"
+            style={!pathMode ? { background: '#1e293b', color: '#94a3b8', borderColor: 'rgba(255, 255, 255, 0.15)' } : {}}
+            title="Trace shortest connection path between two nodes"
           >
             <GitBranch size={13} style={{ marginRight: 4 }} />
             Path Finder
           </button>
 
-          {/* Viewport Actions */}
+          {/* Viewport Zoom & Export Actions */}
           <div style={{ display: 'flex', gap: 2, marginLeft: 4 }}>
             <button
               className="btn btn-secondary btn-sm"
               onClick={() => cyInstance.current?.zoom({ level: (cyInstance.current?.zoom() || 1) * 1.25 })}
               title="Zoom In"
-              style={{ padding: '5px 8px' }}
+              style={{ padding: '5px 8px', background: '#1e293b', color: '#e2e8f0', borderColor: 'rgba(255, 255, 255, 0.15)' }}
             >
               <ZoomIn size={14} />
             </button>
@@ -954,7 +1157,7 @@ export default function NetworkGraphPage() {
               className="btn btn-secondary btn-sm"
               onClick={() => cyInstance.current?.zoom({ level: (cyInstance.current?.zoom() || 1) * 0.8 })}
               title="Zoom Out"
-              style={{ padding: '5px 8px' }}
+              style={{ padding: '5px 8px', background: '#1e293b', color: '#e2e8f0', borderColor: 'rgba(255, 255, 255, 0.15)' }}
             >
               <ZoomOut size={14} />
             </button>
@@ -962,7 +1165,7 @@ export default function NetworkGraphPage() {
               className="btn btn-secondary btn-sm"
               onClick={() => cyInstance.current?.fit(undefined, 40)}
               title="Fit Entire Graph to View"
-              style={{ padding: '5px 8px' }}
+              style={{ padding: '5px 8px', background: '#1e293b', color: '#e2e8f0', borderColor: 'rgba(255, 255, 255, 0.15)' }}
             >
               <Maximize2 size={14} />
             </button>
@@ -970,7 +1173,7 @@ export default function NetworkGraphPage() {
               className="btn btn-secondary btn-sm"
               onClick={() => loadNetwork()}
               title="Reload Network Data"
-              style={{ padding: '5px 8px' }}
+              style={{ padding: '5px 8px', background: '#1e293b', color: '#e2e8f0', borderColor: 'rgba(255, 255, 255, 0.15)' }}
             >
               <RefreshCw size={14} />
             </button>
@@ -978,7 +1181,7 @@ export default function NetworkGraphPage() {
               className="btn btn-secondary btn-sm"
               onClick={exportGraph}
               title="Export High-Res PNG"
-              style={{ padding: '5px 8px' }}
+              style={{ padding: '5px 8px', background: '#1e293b', color: '#e2e8f0', borderColor: 'rgba(255, 255, 255, 0.15)' }}
             >
               <Download size={14} />
             </button>
@@ -991,11 +1194,11 @@ export default function NetworkGraphPage() {
         <div
           style={{
             padding: '6px 14px',
-            background: searchFeedback.includes('not found') ? '#fef2f2' : '#eff6ff',
-            border: `1px solid ${searchFeedback.includes('not found') ? '#fecaca' : '#bfdbfe'}`,
+            background: searchFeedback.includes('not found') ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+            border: `1px solid ${searchFeedback.includes('not found') ? 'rgba(239, 68, 68, 0.4)' : 'rgba(56, 189, 248, 0.4)'}`,
             borderRadius: 6,
-            fontSize: '0.78rem',
-            color: searchFeedback.includes('not found') ? '#dc2626' : '#1d4ed8',
+            fontSize: '0.8rem',
+            color: searchFeedback.includes('not found') ? '#fca5a5' : '#7dd3fc',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -1018,14 +1221,15 @@ export default function NetworkGraphPage() {
           alignItems: 'center',
           gap: 6,
           flexWrap: 'wrap',
-          background: 'var(--bg-card)',
+          background: 'rgba(15, 23, 42, 0.90)',
+          backdropFilter: 'blur(8px)',
           padding: '6px 12px',
           borderRadius: 'var(--radius-sm)',
-          border: '1px solid var(--border-primary)',
+          border: '1px solid rgba(255, 255, 255, 0.10)',
           fontSize: '0.75rem',
         }}
       >
-        <span style={{ fontWeight: 600, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4, marginRight: 4 }}>
+        <span style={{ fontWeight: 600, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 4, marginRight: 4 }}>
           <Filter size={12} /> Entity Filters:
         </span>
         {Object.entries(NODE_COLORS).map(([type, color]) => {
@@ -1041,9 +1245,9 @@ export default function NetworkGraphPage() {
                 gap: 5,
                 padding: '3px 8px',
                 borderRadius: 4,
-                border: `1px solid ${isHidden ? 'var(--border-primary)' : color}`,
-                background: isHidden ? 'var(--bg-secondary)' : `${color}15`,
-                color: isHidden ? 'var(--text-muted)' : 'var(--text-primary)',
+                border: `1px solid ${isHidden ? 'rgba(255, 255, 255, 0.1)' : `${color}80`}`,
+                background: isHidden ? 'rgba(30, 41, 59, 0.4)' : `${color}20`,
+                color: isHidden ? '#64748b' : '#f8fafc',
                 cursor: 'pointer',
                 fontSize: '0.72rem',
                 fontWeight: 500,
@@ -1063,7 +1267,14 @@ export default function NetworkGraphPage() {
           <button
             onClick={resetFilters}
             className="btn btn-secondary btn-sm"
-            style={{ padding: '2px 8px', fontSize: '0.7rem', marginLeft: 'auto' }}
+            style={{
+              padding: '2px 8px',
+              fontSize: '0.7rem',
+              marginLeft: 'auto',
+              background: '#1e293b',
+              color: '#e2e8f0',
+              borderColor: 'rgba(255, 255, 255, 0.15)',
+            }}
           >
             Reset Filters
           </button>
@@ -1075,8 +1286,8 @@ export default function NetworkGraphPage() {
         <div
           style={{
             padding: '10px 14px',
-            background: 'rgba(37, 99, 235, 0.08)',
-            border: '1px solid rgba(37, 99, 235, 0.25)',
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.35)',
             borderRadius: 'var(--radius-sm)',
             display: 'flex',
             alignItems: 'center',
@@ -1084,12 +1295,22 @@ export default function NetworkGraphPage() {
             flexWrap: 'wrap',
           }}
         >
-          <GitBranch size={16} color="var(--accent-primary)" />
-          <span style={{ fontSize: '0.825rem', color: 'var(--text-primary)' }}>
+          <GitBranch size={16} color="#fbbf24" />
+          <span style={{ fontSize: '0.825rem', color: '#fef3c7' }}>
             <strong>Path Analysis:</strong> Click <strong>Source Node</strong>, then click <strong>Destination Node</strong> on the canvas to compute shortest connectivity path.
           </span>
           {pathNodes.map((n, i) => (
-            <span key={i} className="badge badge-info" style={{ fontSize: '0.72rem' }}>
+            <span
+              key={i}
+              style={{
+                fontSize: '0.72rem',
+                padding: '3px 8px',
+                borderRadius: 4,
+                background: i === 0 ? 'rgba(56, 189, 248, 0.2)' : 'rgba(245, 158, 11, 0.25)',
+                color: i === 0 ? '#7dd3fc' : '#fde68a',
+                border: `1px solid ${i === 0 ? '#38bdf8' : '#f59e0b'}`,
+              }}
+            >
               {i === 0 ? 'Source (A):' : 'Destination (B):'} {getNodeLabel(n)} ({n.nodeType})
             </span>
           ))}
@@ -1099,8 +1320,8 @@ export default function NetworkGraphPage() {
             </button>
           )}
           {pathResult && (
-            <span style={{ fontSize: '0.78rem', fontWeight: 600, color: pathResult.length > 0 ? '#16a34a' : '#dc2626' }}>
-              {pathResult.length > 0 ? `✓ Connection Path Identified (${pathResult[0].length} hops)` : '✗ No path found'}
+            <span style={{ fontSize: '0.78rem', fontWeight: 600, color: pathResult.length > 0 ? '#4ade80' : '#f87171' }}>
+              {pathResult.length > 0 ? `✓ Connection Path Identified (${pathResult[0].length} hops)` : '✗ No connected path found'}
             </span>
           )}
         </div>
@@ -1108,14 +1329,16 @@ export default function NetworkGraphPage() {
 
       {/* Main Canvas & Detail Sidebar Area */}
       <div style={{ flex: 1, display: 'flex', gap: 10, minHeight: 0 }}>
-        {/* Canvas Container */}
+        {/* Canvas Container with Developer-Grade Dark Background */}
         <div
           className="graph-container"
           style={{
             flex: 1,
             position: 'relative',
-            background: '#f8fafc',
-            border: '1px solid var(--border-primary)',
+            background: '#090d16',
+            backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px)',
+            backgroundSize: '24px 24px',
+            border: '1px solid rgba(255, 255, 255, 0.12)',
             borderRadius: 'var(--radius-md)',
             overflow: 'hidden',
           }}
@@ -1130,12 +1353,13 @@ export default function NetworkGraphPage() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: 12,
-                background: 'rgba(255, 255, 255, 0.75)',
+                background: 'rgba(9, 13, 22, 0.85)',
+                backdropFilter: 'blur(4px)',
                 zIndex: 100,
               }}
             >
               <div className="loading-spinner" style={{ width: 36, height: 36, borderWidth: 3 }} />
-              <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+              <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>
                 Organizing network topology...
               </span>
             </div>
@@ -1143,7 +1367,40 @@ export default function NetworkGraphPage() {
 
           <div ref={cyRef} style={{ width: '100%', height: '100%' }} />
 
-          {/* Bottom Graph Stats & Legal Disclaimer */}
+          {/* Interactive Floating Hover Tooltip */}
+          {hoverTooltip && hoverTooltip.node && (
+            <div
+              style={{
+                position: 'fixed',
+                left: hoverTooltip.x,
+                top: hoverTooltip.y,
+                transform: 'translate(-50%, -100%)',
+                background: 'rgba(15, 23, 42, 0.96)',
+                border: '1px solid rgba(56, 189, 248, 0.4)',
+                borderRadius: 6,
+                padding: '6px 10px',
+                fontSize: '0.75rem',
+                color: '#f8fafc',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)',
+                pointerEvents: 'none',
+                zIndex: 2000,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                <span>{NODE_ICONS[hoverTooltip.node.nodeType]}</span>
+                <strong style={{ color: '#38bdf8' }}>{hoverTooltip.node.nodeType}</strong>
+                <span style={{ color: '#94a3b8', fontSize: '0.7rem' }}>
+                  ({hoverTooltip.node.degree || 0} connections)
+                </span>
+              </div>
+              <div style={{ fontWeight: 600, color: '#ffffff' }}>
+                {getNodeFullLabel(hoverTooltip.node)}
+              </div>
+            </div>
+          )}
+
+          {/* Bottom Graph Stats & Neutral Analytics Disclaimer */}
           <div
             style={{
               position: 'absolute',
@@ -1160,65 +1417,80 @@ export default function NetworkGraphPage() {
           >
             <div
               style={{
-                padding: '5px 12px',
-                background: 'rgba(255, 255, 255, 0.95)',
-                border: '1px solid var(--border-primary)',
+                padding: '6px 14px',
+                background: 'rgba(15, 23, 42, 0.92)',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
                 borderRadius: 6,
-                fontSize: '0.72rem',
-                color: 'var(--text-secondary)',
-                boxShadow: 'var(--shadow-sm)',
+                fontSize: '0.75rem',
+                color: '#cbd5e1',
+                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
                 pointerEvents: 'auto',
                 display: 'flex',
                 alignItems: 'center',
-                gap: 8,
+                gap: 10,
               }}
             >
-              <span><strong>{nodeCount}</strong> Nodes</span>
-              <span>•</span>
-              <span><strong>{edgeCount}</strong> Relationships</span>
-              <span>•</span>
-              <span><strong>{componentCount}</strong> Network Clusters</span>
+              <span><strong style={{ color: '#f8fafc' }}>{nodeCount}</strong> Nodes</span>
+              <span style={{ color: '#475569' }}>•</span>
+              <span><strong style={{ color: '#f8fafc' }}>{edgeCount}</strong> Relationships</span>
+              <span style={{ color: '#475569' }}>•</span>
+              <span><strong style={{ color: '#f8fafc' }}>{componentCount}</strong> Clusters</span>
+              {selectedNode && (
+                <>
+                  <span style={{ color: '#475569' }}>•</span>
+                  <span style={{ color: '#38bdf8' }}>
+                    Selected: <strong>{getNodeLabel(selectedNode)}</strong> ({selectedNode.degree || 0} direct connections{selectedNode.degree && selectedNode.degree >= 6 ? ' · High connectivity' : ''})
+                  </span>
+                </>
+              )}
               {hiddenTypes.size > 0 && (
                 <>
-                  <span>•</span>
-                  <span style={{ color: '#ea580c' }}>({hiddenTypes.size} Types Filtered)</span>
+                  <span style={{ color: '#475569' }}>•</span>
+                  <span style={{ color: '#f97316' }}>({hiddenTypes.size} Types Filtered)</span>
                 </>
               )}
             </div>
 
             <div
-              className="ai-disclaimer"
               style={{
-                padding: '4px 10px',
-                fontSize: '0.7rem',
+                padding: '5px 12px',
+                background: 'rgba(15, 23, 42, 0.92)',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                borderRadius: 6,
+                fontSize: '0.72rem',
+                color: '#94a3b8',
                 pointerEvents: 'auto',
-                boxShadow: 'var(--shadow-sm)',
+                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
               }}
             >
-              Graph shows analytical relationships — not proof of wrongdoing
+              <ShieldCheck size={13} color="#94a3b8" />
+              <span>Graph shows analytical relationships — not proof of wrongdoing</span>
             </div>
           </div>
 
-          {/* Quick Node Type Legend (Top Left Overlay) */}
+          {/* Entity Type Legend Overlay (Top Left) */}
           <div
             style={{
               position: 'absolute',
               top: 12,
               left: 12,
-              background: 'rgba(255, 255, 255, 0.96)',
-              border: '1px solid var(--border-primary)',
+              background: 'rgba(15, 23, 42, 0.92)',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
               borderRadius: 8,
-              padding: '8px 10px',
+              padding: '8px 12px',
               display: 'flex',
               flexDirection: 'column',
               gap: 4,
-              boxShadow: 'var(--shadow-sm)',
+              boxShadow: '0 4px 16px rgba(0, 0, 0, 0.3)',
               pointerEvents: 'auto',
-              maxHeight: 200,
+              maxHeight: 220,
               overflowY: 'auto',
             }}
           >
-            <span style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+            <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Legend
             </span>
             {Object.entries(NODE_COLORS).map(([type, color]) => (
@@ -1228,8 +1500,8 @@ export default function NetworkGraphPage() {
                   display: 'flex',
                   alignItems: 'center',
                   gap: 6,
-                  fontSize: '0.7rem',
-                  color: 'var(--text-secondary)',
+                  fontSize: '0.72rem',
+                  color: '#cbd5e1',
                 }}
               >
                 <span style={{ width: 7, height: 7, borderRadius: 2, background: color }} />
@@ -1255,7 +1527,15 @@ export default function NetworkGraphPage() {
           >
             {/* Selected Node Details Card */}
             {selectedNode && (
-              <div className="card" style={{ padding: 16 }}>
+              <div
+                style={{
+                  background: 'rgba(15, 23, 42, 0.95)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 16,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+                }}
+              >
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 12 }}>
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
@@ -1263,25 +1543,41 @@ export default function NetworkGraphPage() {
                       <span
                         className="badge"
                         style={{
-                          background: `${NODE_COLORS[selectedNode.nodeType]}20`,
+                          background: `${NODE_COLORS[selectedNode.nodeType]}25`,
                           color: NODE_COLORS[selectedNode.nodeType],
+                          borderColor: `${NODE_COLORS[selectedNode.nodeType]}60`,
                           fontWeight: 700,
                         }}
                       >
                         {selectedNode.nodeType}
                       </span>
                       {selectedNode.isHighConnectivity && (
-                        <span className="badge badge-info" style={{ fontSize: '0.65rem' }}>
+                        <span
+                          style={{
+                            fontSize: '0.65rem',
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'rgba(56, 189, 248, 0.2)',
+                            color: '#38bdf8',
+                            border: '1px solid rgba(56, 189, 248, 0.4)',
+                            fontWeight: 600,
+                          }}
+                        >
                           High connectivity
                         </span>
                       )}
                     </div>
-                    <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
-                      {getNodeLabel(selectedNode)}
+                    <h3 style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: '#f8fafc', wordBreak: 'break-word' }}>
+                      {getNodeFullLabel(selectedNode)}
                     </h3>
                   </div>
 
-                  <button className="btn btn-ghost btn-sm" onClick={resetFocus} title="Close & Reset Focus">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={resetFocus}
+                    title="Close & Reset Focus"
+                    style={{ color: '#94a3b8' }}
+                  >
                     <X size={14} />
                   </button>
                 </div>
@@ -1289,52 +1585,90 @@ export default function NetworkGraphPage() {
                 {/* Node Degree Metric */}
                 <div
                   style={{
-                    background: 'var(--bg-elevated)',
+                    background: '#1e293b',
                     borderRadius: 6,
-                    padding: '6px 10px',
+                    padding: '8px 12px',
                     fontSize: '0.75rem',
-                    marginBottom: 10,
+                    marginBottom: 12,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
+                    border: '1px solid rgba(255, 255, 255, 0.08)',
                   }}
                 >
-                  <span style={{ color: 'var(--text-muted)' }}>Network Connections:</span>
-                  <strong style={{ color: 'var(--text-primary)' }}>
+                  <span style={{ color: '#94a3b8' }}>Network Connections:</span>
+                  <strong style={{ color: '#38bdf8' }}>
                     {selectedNode.degree || 0} Incident Edges
                   </strong>
                 </div>
 
                 {/* Properties List */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 14 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
                   {Object.entries(selectedNode)
-                    .filter(([k]) => !['id', 'nodeType', 'createdAt', 'degree', 'isHighConnectivity'].includes(k))
+                    .filter(([k]) => !['id', 'nodeType', 'createdAt', 'degree', 'isHighConnectivity', 'fullLabel', 'label'].includes(k))
                     .filter(([, v]) => v !== null && v !== undefined && v !== '')
                     .map(([k, v]) => (
                       <div key={k} style={{ display: 'flex', gap: 8, fontSize: '0.78rem' }}>
-                        <span style={{ color: 'var(--text-muted)', textTransform: 'capitalize', width: 95, flexShrink: 0 }}>
+                        <span style={{ color: '#94a3b8', textTransform: 'capitalize', width: 95, flexShrink: 0 }}>
                           {k.replace(/([A-Z])/g, ' $1').toLowerCase()}
                         </span>
-                        <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-word', flex: 1 }}>
+                        <span style={{ color: '#e2e8f0', wordBreak: 'break-word', flex: 1 }}>
                           {String(v)}
                         </span>
                       </div>
                     ))}
                 </div>
 
-                {/* Actions */}
+                {/* Focus, Expand & Profile Actions */}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <button className="btn btn-primary btn-sm" onClick={() => expandNode(selectedNode)}>
-                    <ChevronRight size={12} /> Expand Connections
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={focusSelected}
+                    style={{ padding: '5px 10px', fontSize: '0.75rem' }}
+                  >
+                    <Focus size={12} style={{ marginRight: 4 }} /> Focus Selected
                   </button>
-                  <button className="btn btn-secondary btn-sm" onClick={resetFocus}>
-                    Reset Focus
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => expandNode(selectedNode)}
+                    style={{
+                      padding: '5px 10px',
+                      fontSize: '0.75rem',
+                      background: '#1e293b',
+                      color: '#e2e8f0',
+                      borderColor: 'rgba(255, 255, 255, 0.15)',
+                    }}
+                  >
+                    <ChevronRight size={12} /> Expand
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={resetFocus}
+                    style={{
+                      padding: '5px 10px',
+                      fontSize: '0.75rem',
+                      background: '#1e293b',
+                      color: '#94a3b8',
+                      borderColor: 'rgba(255, 255, 255, 0.15)',
+                    }}
+                  >
+                    Reset
                   </button>
                   <a
                     href={`/entities/${selectedNode.nodeType}/${selectedNode.id}`}
                     className="btn btn-secondary btn-sm"
                     target="_blank"
                     rel="noreferrer"
+                    style={{
+                      padding: '5px 10px',
+                      fontSize: '0.75rem',
+                      background: '#1e293b',
+                      color: '#e2e8f0',
+                      borderColor: 'rgba(255, 255, 255, 0.15)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
                   >
                     <Info size={12} /> Profile
                   </a>
@@ -1344,12 +1678,24 @@ export default function NetworkGraphPage() {
 
             {/* Selected Edge Details Card */}
             {selectedEdge && (
-              <div className="card" style={{ padding: 16 }}>
+              <div
+                style={{
+                  background: 'rgba(15, 23, 42, 0.95)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 16,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+                }}
+              >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#f8fafc' }}>
                     Relationship Details
                   </span>
-                  <button className="btn btn-ghost btn-sm" onClick={() => setSelectedEdge(null)}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setSelectedEdge(null)}
+                    style={{ color: '#94a3b8' }}
+                  >
                     <X size={14} />
                   </button>
                 </div>
@@ -1357,13 +1703,14 @@ export default function NetworkGraphPage() {
                 <div
                   style={{
                     padding: '8px 10px',
-                    background: 'var(--bg-elevated)',
+                    background: '#1e293b',
                     borderRadius: 6,
                     textAlign: 'center',
                     fontSize: '0.85rem',
                     fontWeight: 700,
-                    color: 'var(--accent-primary)',
+                    color: '#38bdf8',
                     marginBottom: 10,
+                    border: '1px solid rgba(56, 189, 248, 0.3)',
                   }}
                 >
                   {selectedEdge.type?.replace(/_/g, ' ')}
@@ -1371,62 +1718,83 @@ export default function NetworkGraphPage() {
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: '0.78rem' }}>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <span style={{ color: 'var(--text-muted)', width: 90, flexShrink: 0 }}>Endpoints:</span>
-                    <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
-                      {selectedEdge.source} → {selectedEdge.target}
+                    <span style={{ color: '#94a3b8', width: 90, flexShrink: 0 }}>Endpoints:</span>
+                    <span style={{ color: '#e2e8f0', fontFamily: 'var(--font-mono)' }}>
+                      {selectedEdge.source} {selectedEdge.hasDirection ? '→' : '—'} {selectedEdge.target}
                     </span>
                   </div>
                   {selectedEdge.confidence && (
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <span style={{ color: 'var(--text-muted)', width: 90 }}>Confidence:</span>
-                      <strong style={{ color: '#16a34a' }}>{Math.round(Number(selectedEdge.confidence) * 100)}%</strong>
+                      <span style={{ color: '#94a3b8', width: 90 }}>Confidence:</span>
+                      <strong style={{ color: '#4ade80' }}>{Math.round(Number(selectedEdge.confidence) * 100)}%</strong>
                     </div>
                   )}
                   {selectedEdge.timestamp && (
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <span style={{ color: 'var(--text-muted)', width: 90 }}>Timestamp:</span>
-                      <span>{new Date(selectedEdge.timestamp).toLocaleString()}</span>
+                      <span style={{ color: '#94a3b8', width: 90 }}>Timestamp:</span>
+                      <span style={{ color: '#cbd5e1' }}>{new Date(selectedEdge.timestamp).toLocaleString()}</span>
                     </div>
                   )}
                   {selectedEdge.relSource && (
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <span style={{ color: 'var(--text-muted)', width: 90 }}>Source:</span>
-                      <span>{selectedEdge.relSource}</span>
+                      <span style={{ color: '#94a3b8', width: 90 }}>Source:</span>
+                      <span style={{ color: '#cbd5e1' }}>{selectedEdge.relSource}</span>
                     </div>
                   )}
                   {selectedEdge.recordRef && (
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <span style={{ color: 'var(--text-muted)', width: 90 }}>Record Ref:</span>
-                      <span style={{ fontFamily: 'var(--font-mono)' }}>{selectedEdge.recordRef}</span>
+                      <span style={{ color: '#94a3b8', width: 90 }}>Record Ref:</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', color: '#cbd5e1' }}>{selectedEdge.recordRef}</span>
                     </div>
                   )}
                 </div>
 
-                <div className="ai-disclaimer" style={{ marginTop: 12, fontSize: '0.7rem' }}>
-                  Relationship shown is based on recorded telecom or case data.
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: '6px 10px',
+                    borderRadius: 4,
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    fontSize: '0.7rem',
+                    color: '#94a3b8',
+                  }}
+                >
+                  Relationship is extracted from verified telecom or case intelligence records.
                 </div>
               </div>
             )}
 
             {/* Path Finder Sequence Card */}
             {pathResult && pathResult.length > 0 && (
-              <div className="card" style={{ padding: 16 }}>
+              <div
+                style={{
+                  background: 'rgba(15, 23, 42, 0.95)',
+                  border: '1px solid rgba(245, 158, 11, 0.35)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 16,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+                }}
+              >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#fbbf24' }}>
                     Connectivity Path Sequence
                   </span>
-                  <button className="btn btn-ghost btn-sm" onClick={() => { setPathResult(null); resetFocus(); }}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => { setPathResult(null); resetFocus(); }}
+                    style={{ color: '#94a3b8' }}
+                  >
                     <X size={14} />
                   </button>
                 </div>
 
                 {pathResult.map((path: any, i: number) => (
                   <div key={i}>
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: 8 }}>
-                      Path Distance: <strong>{path.length} hops</strong> ({path.nodes?.length || 0} entities)
+                    <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginBottom: 8 }}>
+                      Distance: <strong style={{ color: '#fbbf24' }}>{path.length} hops</strong> ({path.nodes?.length || 0} entities)
                     </div>
 
-                    {/* Step-by-step sequential breadcrumb chain */}
+                    {/* Step-by-step breadcrumb sequence */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
                       {path.nodes?.map((n: any, j: number) => {
                         const nextEdge = path.edges?.[j];
@@ -1438,19 +1806,20 @@ export default function NetworkGraphPage() {
                                 alignItems: 'center',
                                 gap: 6,
                                 padding: '6px 10px',
-                                background: '#ffffff',
+                                background: '#1e293b',
                                 border: '1px solid #f59e0b',
                                 borderRadius: 6,
                                 fontSize: '0.78rem',
                               }}
                             >
+                              <span style={{ fontSize: '0.7rem', color: '#fbbf24', fontWeight: 700 }}>#{j + 1}</span>
                               <span>{NODE_ICONS[n.nodeType]}</span>
-                              <strong style={{ color: 'var(--text-primary)' }}>{n.name || n.id}</strong>
+                              <strong style={{ color: '#f8fafc' }}>{n.name || n.id}</strong>
                               <span
                                 className="badge"
                                 style={{
                                   fontSize: '0.62rem',
-                                  background: `${NODE_COLORS[n.nodeType]}18`,
+                                  background: `${NODE_COLORS[n.nodeType]}25`,
                                   color: NODE_COLORS[n.nodeType],
                                   marginLeft: 'auto',
                                 }}
@@ -1468,7 +1837,7 @@ export default function NetworkGraphPage() {
                                   gap: 4,
                                   padding: '3px 0',
                                   fontSize: '0.7rem',
-                                  color: '#d97706',
+                                  color: '#fbbf24',
                                   fontWeight: 600,
                                 }}
                               >
@@ -1480,7 +1849,15 @@ export default function NetworkGraphPage() {
                       })}
                     </div>
 
-                    <div className="ai-disclaimer" style={{ fontSize: '0.7rem' }}>
+                    <div
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 4,
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        fontSize: '0.7rem',
+                        color: '#94a3b8',
+                      }}
+                    >
                       {path.disclaimer || 'Topological traversal lead — requires corroboration.'}
                     </div>
                   </div>
